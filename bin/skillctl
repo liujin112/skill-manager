@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Compatibility shim: skillctl was renamed to `skill`. Old subcommands and
+# flags (install/backup/doctor/list/setup, -t/-f/-r/-s/-a/-F/-n/-y/-N) still work.
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skill" "$@"
