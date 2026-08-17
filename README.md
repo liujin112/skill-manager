@@ -101,6 +101,16 @@ Whole-directory symlinks: install once into the shared dir and every linked
 agent sees it immediately. Skills unique to a target are merged into the
 shared dir first, so nothing is lost; undo by deleting the symlink.
 
+## Let your agent drive it
+
+An agent-facing skill lives at `skills/skill-manager/` — it teaches Claude
+Code / Codex / Cursor / Trae how to run this CLI non-interactively. Import and
+install it with the CLI itself:
+
+```bash
+skill install https://github.com/liujin112/skill-manager --to claude
+```
+
 ## Environment variables
 
 - `SKILL_REPO_ROOT` — library location (default: the repo the tool lives in)
