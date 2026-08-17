@@ -1,6 +1,6 @@
 ---
 name: skill-manager
-description: Operate the `skill` CLI (skill-manager) to manage agent skills for the user. Use when the user asks to install/uninstall/search agent skills, save a local skill into their skill repo, import skills from a GitHub repo, share one skills directory across agents (claude/codex/cursor/trae), check whether installed skills drifted from the repo, or mentions skill-manager / skillctl / skill 命令. Chinese triggers: 装skill、安装技能、保存skill、备份skill、从github装skill、同步技能、技能仓库、更新skill.
+description: Operate the `skill` CLI (skill-manager) to manage agent skills for the user. Use when the user asks to install/uninstall/search agent skills, save a local skill into their skill repo, import skills from a GitHub repo, share one skills directory across agents (claude/codex/cursor/trae), check whether installed skills drifted from the repo, or mentions skill-manager, skillctl, or the skill command. Chinese triggers include 装skill、安装技能、保存skill、备份skill、从github装skill、同步技能、技能仓库、更新skill.
 ---
 
 # skill-manager — agent usage
