@@ -172,13 +172,6 @@ class Repo:
             raise CLIError(f"'{ref}' exists in multiple collections; use one of: {refs}")
         return matches[0]
 
-    def search(self, keyword: str) -> List[Skill]:
-        kw = keyword.lower()
-        return [
-            s for s in self.skills()
-            if kw in s.name.lower() or kw in s.description.lower()
-        ]
-
 
 def find_repo_root(cli_override: Optional[str] = None) -> Path:
     """Locate the skill-manager repo: explicit flag > env var > this file's repo."""

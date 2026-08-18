@@ -49,14 +49,17 @@ skill uninstall some-skill --from claude
 ```
 
 Run `install` / `save` / `uninstall` with no arguments for interactive pickers
-(`Space` select, `a` all, `Enter` confirm, `q` cancel).
+— clack-style prompts that redraw in a small window and collapse to a one-line
+summary once answered. Keys: `Space` select, `a` all, `/` live filter (handy
+when an imported repo has 30+ skills; `a` then selects all matches), `Enter`
+confirm, `q` cancel.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `skill list [collection\|local]` | List repo skills with descriptions, or installed ones |
-| `skill search <keyword>` | Search names and descriptions |
+| `skill search <keyword...>` | Search names and descriptions (all keywords must match; `-r` narrows) |
 | `skill info <name>` | Frontmatter, size, install locations and drift |
 | `skill install [name...\|url]` | Repo → agent dirs; identical re-installs are `up-to-date` |
 | `skill uninstall <name...>` | Remove installed skills from agent dirs |

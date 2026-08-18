@@ -131,12 +131,12 @@ def _print_results(groups: Sequence[Tuple[str, Sequence[OpResult]]]) -> None:
 
 def _confirm_plan(action: str, names: Sequence[str], where: str, args: argparse.Namespace,
                   noun: str = "skill(s)") -> None:
-    print(f"\n{action} {len(names)} {noun} -> {where}")
-    for name in names:
-        print(f"  - {name}")
+    print(f"\n{bold(action)} {len(names)} {noun} -> {cyan(where)}")
+    print(textwrap.fill(", ".join(names), max(40, _term_width() - 4),
+                        initial_indent="  ", subsequent_indent="  "))
     if getattr(args, "yes", False) or not _interactive(args):
         return
-    answer = input("Proceed? [Y/n] ").strip().lower()
+    answer = input(f"{cyan(tui.GLYPH_ACTIVE)} Proceed? [Y/n] ").strip().lower()
     if answer in {"n", "no", "q", "quit"}:
         raise SystemExit(130)
 
@@ -158,7 +158,7 @@ def _confirm_overwrite(skills: Sequence[Skill], targets: Sequence[Target], args:
     for item in diffs:
         print(f"  {yellow(item)}")
     if _interactive(args):
-        answer = input("Overwrite these? [y/N] ").strip().lower()
+        answer = input(f"{cyan(tui.GLYPH_ACTIVE)} Overwrite these? [y/N] ").strip().lower()
         return answer in {"y", "yes"}
     print("They will be skipped. Use --force to overwrite.")
     return False
@@ -202,7 +202,7 @@ def _resolve_or_create_collection(repo: Repo, raw: str, args: argparse.Namespace
     except CLIError:
         pass
     if _interactive(args) and not getattr(args, "yes", False):
-        answer = input(f"Collection '{raw}' does not exist. Create it? [Y/n] ").strip().lower()
+        answer = input(f"{cyan(tui.GLYPH_ACTIVE)} Collection '{raw}' does not exist. Create it? [Y/n] ").strip().lower()
         if answer in {"n", "no", "q", "quit"}:
             raise SystemExit(130)
     elif not getattr(args, "yes", False):
@@ -226,22 +226,26 @@ def _pick_repo_skills(repo: Repo, colls: Optional[List[str]], title: str) -> Lis
 
 
 def _ask_scope(project_root: Path) -> str:
-    """One g/l keystroke choosing global (~/.<agent>/skills) vs project-local scope."""
-    sys.stdout.write(
-        f"Scope: [g]lobal ~/.<agent>/skills  or  [l]ocal {project_root}/.<agent>/skills  [G/l] "
-    )
+    """One g/l keystroke choosing global (~/.<agent>/skills) vs project-local
+    scope; the prompt collapses to a one-line summary once answered."""
+    plain = f"Scope · [g]lobal ~/.<agent>/skills · [l]ocal {project_root}/.<agent>/skills [G/l] "
+    sys.stdout.write(cyan(tui.GLYPH_ACTIVE) + " " + _trunc(plain, _term_width() - 3))
     sys.stdout.flush()
     while True:
         key = tui.read_key()
         if key in {"g", "G", "enter", "space"}:
-            print("global")
-            return "global"
-        if key in {"l", "L"}:
-            print("local")
-            return "local"
-        if key in {"quit", "escape"}:
-            print()
+            answer = "global"
+        elif key in {"l", "L"}:
+            answer = "local"
+        elif key in {"quit", "escape"}:
+            sys.stdout.write("\r\x1b[2K")
+            tui.step_done("Scope", "cancelled")
             raise SystemExit(130)
+        else:
+            continue
+        sys.stdout.write("\r\x1b[2K")
+        tui.step_done("Scope", answer)
+        return answer
 
 
 def _targets_from_specs(values: List[str], project_root: Path, args: argparse.Namespace) -> List[Target]:
@@ -372,9 +376,13 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 def cmd_search(args: argparse.Namespace) -> None:
     repo = _repo(args)
-    matches = repo.search(args.keyword)
+    kws = [k.lower() for k in args.keywords]
+    matches = [
+        s for s in repo.skills(_selected_collections(repo, args))
+        if all(k in (s.ref + " " + s.description).lower() for k in kws)
+    ]
     if not matches:
-        print(f"No skills matching '{args.keyword}'.")
+        print(f"No skills matching '{' '.join(args.keywords)}'.")
         raise SystemExit(1)
     _print_skill_rows([(s.ref, s.description) for s in matches])
 
@@ -541,7 +549,7 @@ def cmd_save(args: argparse.Namespace) -> None:
     elif interactive:
         picked = _pick_collections(repo, "Save into which collection?", allow_all=False, allow_new=True)
         if picked == "__new__":
-            collection = _create_collection(repo, input("New collection name: "))
+            collection = _create_collection(repo, input(f"{cyan(tui.GLYPH_ACTIVE)} New collection name: "))
         else:
             collection = picked[0]  # type: ignore[index]
     else:
@@ -861,7 +869,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("search", aliases=["find"], help="search skills by name/description keyword")
     _add_common(p)
-    p.add_argument("keyword")
+    p.add_argument("keywords", nargs="+", metavar="keyword",
+                   help="all keywords must match (name, collection, or description)")
+    p.add_argument("-r", "--collection", dest="collection_opt", action="append", metavar="COLL",
+                   help="search only these collections (repeatable, shorthands work)")
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("info", aliases=["show"], help="show a skill's metadata and install locations")

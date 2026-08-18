@@ -28,7 +28,7 @@ agent dirs like `~/.claude/skills` (global) or `<project>/.claude/skills`
 | Task | Command |
 | --- | --- |
 | Browse library | `skill list` · `skill list -r <coll>` · `skill list local` |
-| Find a skill | `skill search <keyword>` |
+| Find a skill | `skill search <keyword...>` (all must match; `-r <coll>` narrows) |
 | Inspect | `skill info <name>` (metadata, size, install locations, drift) |
 | Install | `skill install <name> --to claude -N -y` |
 | Install a collection | `skill install -r <coll> -a --to claude,codex -N -y` |
