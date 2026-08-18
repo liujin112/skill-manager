@@ -584,8 +584,8 @@ def _get_from_git(args: argparse.Namespace, repo: Repo, interactive: bool) -> Tu
     """Shared clone->discover->select->import flow for `skill get` and
     `skill install <git-url>`. Returns (collection, chosen skill dirs)."""
     source = parse_git_url(args.url)
-    clone_dir = repo.root / "repos" / source.name
-    state = ensure_clone(source, clone_dir)
+    clone_dir = repo.root / "repos" / source.slug
+    state = ensure_clone(source, clone_dir, legacy_dest=repo.root / "repos" / source.name)
     print(f"{state}: {source.clone_url}" + (f" (branch {source.branch})" if source.branch else "")
           + dim(f"  -> {clone_dir}"))
 

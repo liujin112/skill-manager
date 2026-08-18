@@ -86,6 +86,8 @@ skill get https://github.com/owner/repo/tree/main/skills # branch + subdir links
 skill get owner/repo -a                                  # shorthand
 ```
 
+Clones are cached as `repos/<owner>--<repo>` (e.g. `anthropics--skills`), so
+same-named repos from different authors never collide.
 A `SKILL.md` at the repo root means the whole repo is one skill; otherwise
 every directory containing a `SKILL.md` is discovered. Skills are imported
 into a collection named after the repo (`-r` to override), with provenance

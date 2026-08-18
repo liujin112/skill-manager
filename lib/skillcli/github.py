@@ -18,9 +18,17 @@ SKIP_DIRS = {".git", ".github", "node_modules", "__pycache__", "venv", ".venv"}
 @dataclass(frozen=True)
 class GitSource:
     clone_url: str
-    name: str  # repo name; also the default collection name and clone dir name
+    name: str  # repo name; also the default collection name
     branch: Optional[str] = None
     subpath: str = ""  # only scan this subdirectory for skills
+    owner: str = ""  # host account/group; clones land at repos/<owner>--<name>
+
+    @property
+    def slug(self) -> str:
+        """Clone directory name under repos/ — owner-qualified (flat, '--'
+        separator as in the HF cache) so that repos with generic names
+        (skills, dotfiles, ...) cannot collide."""
+        return f"{self.owner}--{self.name}" if self.owner else self.name
 
 
 def is_git_url(raw: str) -> bool:
@@ -37,19 +45,28 @@ def parse_git_url(raw: str) -> GitSource:
     )
     if m:
         owner, name, branch, subpath = m.groups()
-        return GitSource(f"https://github.com/{owner}/{name}.git", name, branch, subpath or "")
+        return GitSource(f"https://github.com/{owner}/{name}.git", name, branch, subpath or "", owner)
     if raw.startswith(("git@", "http://", "https://", "file://")) or raw.endswith(".git"):
         name = raw.split("/")[-1]
         if name.endswith(".git"):
             name = name[:-4]
         if not name:
             raise CLIError(f"cannot parse git URL: {raw}")
-        return GitSource(raw, name)
+        return GitSource(raw, name, owner=_owner_of(raw))
     m = re.match(r"^([\w.-]+)/([\w.-]+)$", raw)
     if m:  # npm-style shorthand: owner/repo -> github
         owner, name = m.groups()
-        return GitSource(f"https://github.com/{owner}/{name}.git", name)
+        return GitSource(f"https://github.com/{owner}/{name}.git", name, owner=owner)
     raise CLIError(f"cannot parse git URL: {raw}")
+
+
+def _owner_of(raw: str) -> str:
+    """Second-to-last path component of a generic git URL (the account/group),
+    or '' when the URL has no path beyond the repo itself."""
+    path = raw.split("://", 1)[-1].split("@", 1)[-1].removesuffix(".git")
+    parts = [p for p in re.split(r"[:/]", path) if p]
+    # parts[0] is the host for scheme/scp-style URLs; need host + owner + repo
+    return parts[-2] if len(parts) >= 3 else ""
 
 
 def _run_git(git_args: List[str]) -> str:
@@ -64,9 +81,16 @@ def _norm_remote(url: str) -> str:
     return url.strip().rstrip("/").removesuffix(".git").lower()
 
 
-def ensure_clone(source: GitSource, dest: Path) -> str:
+def ensure_clone(source: GitSource, dest: Path, legacy_dest: Optional[Path] = None) -> str:
     """Clone `source` into `dest`, or fast-forward an existing clone.
-    Returns 'cloned' or 'updated'."""
+    A clone at `legacy_dest` (the pre-owner flat layout repos/<name>) tracking
+    the same remote is moved to `dest` first. Returns 'cloned' or 'updated'."""
+    if (legacy_dest and legacy_dest != dest and not dest.exists()
+            and (legacy_dest / ".git").exists()):
+        remote = _run_git(["-C", str(legacy_dest), "remote", "get-url", "origin"]).strip()
+        if _norm_remote(remote) == _norm_remote(source.clone_url):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            legacy_dest.rename(dest)
     if (dest / ".git").exists():
         remote = _run_git(["-C", str(dest), "remote", "get-url", "origin"]).strip()
         if _norm_remote(remote) != _norm_remote(source.clone_url):
