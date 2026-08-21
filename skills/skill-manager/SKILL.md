@@ -38,6 +38,8 @@ agent dirs like `~/.claude/skills` (global) or `<project>/.claude/skills`
 | Remove | `skill uninstall <name> --from claude -N -y` |
 | Drift check | `skill status` (ok / modified / untracked) |
 | Share dir across agents | `skill link agents claude,codex -N -y` |
+| Update everything | `skill update -n` to preview, then `skill update` |
+| Commit + push the library | `skill sync` (or `skill sync -m "<message>"`) |
 
 ## Details that matter
 
@@ -63,5 +65,17 @@ agent dirs like `~/.claude/skills` (global) or `<project>/.claude/skills`
 - **status → fix**: `modified` → keep edits with `skill save <name> --from
   <agent> -r <coll> -F -N -y`, or restore with `skill install <name> --to
   <agent> -F -N -y`. `untracked` → adopt with `skill save`.
-- After changing the library (`save`/`get`), remind the user to commit the
-  skill repo (and `bash scripts/sync_public.sh` if the tool itself changed).
+- **update** pulls in three steps: the tool checkout (blocked by unpushed
+  commits or local edits — say so instead of forcing), each imported
+  collection from the URL in its `.source.json` (only when upstream moved),
+  and then installed copies of skills that changed, into the agent dirs that
+  already had them. Locally edited copies are skipped — report them; use `-F`
+  only when the user wants their edits discarded. `skill update <collection>`
+  narrows it; `--no-tool` / `--no-install` skip a step.
+- **sync** is the push side: stage everything, commit with a generated message
+  (`-m` overrides), `pull --rebase`, push. A conflicting rebase aborts itself
+  and needs the user. `--public` also runs `scripts/sync_public.sh`.
+- Neither `update` nor `sync` opens a picker, so they need no `-N -y`; prefer
+  `-n` first for a preview.
+- After changing the library (`save`/`get`), offer to run `skill sync` so the
+  new skills are committed and pushed.

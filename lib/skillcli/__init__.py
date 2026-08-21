@@ -1,2 +1,2 @@
 # skillcli: implementation of the `skill` CLI (see bin/skill).
-__version__ = "2.1.0"
+__version__ = "2.2.0"

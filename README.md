@@ -66,6 +66,8 @@ confirm, `q` cancel.
 | `skill save [name...]` | Agent dir → repo collection (adopt local skills) |
 | `skill get <git-url>` | Clone a repo into `repos/`, import its skills as a collection |
 | `skill link <src> <agents...>` | Symlink agents' skills dirs to one shared dir |
+| `skill update [collection...]` | Pull: the tool checkout, imported collections' upstreams, installed copies |
+| `skill sync` | Push: commit local changes, `pull --rebase`, push the library repo |
 | `skill status` | git-status-like view: ok / modified / untracked |
 | `skill doctor` | Show repo, collections, agent dirs, launcher state |
 | `skill setup` | (Re)install the launcher |
@@ -105,6 +107,40 @@ skill link agents claude,trae   # ~/.claude/skills and ~/.trae/skills become
 Whole-directory symlinks: install once into the shared dir and every linked
 agent sees it immediately. Skills unique to a target are merged into the
 shared dir first, so nothing is lost; undo by deleting the symlink.
+
+## Staying up to date
+
+Your library is a git repo, so keeping it current should not mean `cd`-ing
+into it and running git by hand:
+
+```bash
+skill update            # pull the tool, refresh imported skills, update installs
+skill update -n         # report only: what is behind upstream
+skill sync              # commit local changes, pull --rebase, push
+skill sync -m "add pdf-tools"
+```
+
+`skill update` runs three steps and reports each one:
+
+1. **The tool** — fast-forwards this checkout and shows the version change.
+   Unpushed commits or uncommitted edits block the merge; it tells you to run
+   `skill sync` instead of touching your work.
+2. **Imported collections** — updates each cached clone under `repos/` from the
+   URL in its `.source.json`, and re-imports the recorded skills only when the
+   upstream commit actually moved. Skills that appeared upstream since your
+   import are reported, never installed behind your back; ones you deleted
+   locally stay deleted.
+3. **Installed copies** — skills that changed in this run are copied into every
+   agent directory that already had them (shared symlinked dirs are handled
+   once). Copies you edited yourself are skipped and listed; `-F` overwrites
+   them and re-syncs any other drift.
+
+`skill sync` stages everything, writes a commit message from the diff
+(`Update skills (3 added, 1 updated)`, one `+ collection/name` line per skill),
+rebases onto the remote, and pushes — setting the upstream on a first push. A
+conflicting rebase is aborted so your checkout is never left mid-rebase. Use
+`-n` to preview, `--no-pull` / `--no-push` to run half of it, and `--public` if
+you keep a `scripts/sync_public.sh` mirror script.
 
 ## Let your agent drive it
 

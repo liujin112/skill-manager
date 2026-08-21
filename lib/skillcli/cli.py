@@ -10,12 +10,14 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import textwrap
+from dataclasses import replace
 from datetime import datetime, timezone
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from . import __version__
 from .colors import bold, cyan, dim, green, red, yellow
@@ -38,7 +40,7 @@ from .targets import (
     resolve_target,
     split_specs,
 )
-from . import tui
+from . import tui, vcs
 from .tui import Choice
 
 PROG = "skill"
@@ -749,6 +751,350 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(dim("untracked: add to the repo with `skill save <name> --from <agent> --into <collection>`"))
 
 
+# ---------------------------------------------------------------------------
+# update (pull side) and sync (push side) of the library repo
+
+def _tool_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _pull_checkout(root: Path, label: str, dry: bool) -> None:
+    """Fast-forward one git checkout and report what happened. Local commits or
+    edits block the fast-forward — those are `skill sync`'s job, not update's."""
+    pad = label.ljust(9)
+    if not vcs.is_repo(root):
+        print(f"  {pad} {dim('not a git checkout — skipped')}")
+        return
+    if not vcs.default_remote(root):
+        print(f"  {pad} {dim('no git remote — skipped')}")
+        return
+    err = vcs.fetch(root)
+    if err:
+        print(f"  {pad} {yellow('fetch failed')}  {dim(_trunc(err, 60))}")
+        return
+    st = vcs.state(root)
+    if not st.upstream:
+        print(f"  {pad} {dim(st.branch + ' has no upstream branch — skipped')}")
+        return
+    if st.behind == 0:
+        print(f"  {pad} {green('up to date')}  {dim(f'{st.branch} @ {st.short}')}")
+        return
+    behind = f"{st.behind} commit(s) behind {st.upstream}"
+    if dry:
+        print(f"  {pad} {cyan('would pull')}  {dim(behind)}")
+        return
+    if st.ahead or st.dirty:
+        blocked = []
+        if st.ahead:
+            blocked.append(f"{st.ahead} unpushed commit(s)")
+        if st.dirty:
+            blocked.append(f"{len(st.changes)} uncommitted change(s)")
+        print(f"  {pad} {yellow(behind)}  {dim('but ' + ' and '.join(blocked) + ' — run `skill sync`')}")
+        return
+    was = st.short
+    err = vcs.pull_ff(root)
+    if err:
+        print(f"  {pad} {red('pull failed')}  {dim(_trunc(err, 60))}")
+        return
+    print(f"  {pad} {green(f'pulled {st.behind} commit(s)')}  {dim(f'{was} -> {vcs.state(root).short}')}")
+
+
+def _update_checkouts(repo: Repo, dry: bool) -> None:
+    tool_root = _tool_root()
+    shared = tool_root.resolve() == repo.root.resolve()
+    version_before = vcs.disk_version(tool_root)
+    _pull_checkout(tool_root, "repo" if shared else "tool", dry)
+    if not shared:
+        _pull_checkout(repo.root, "library", dry)
+    version_after = vcs.disk_version(tool_root)
+    if version_after and version_after != version_before:
+        print(f"  {'version'.ljust(9)} {green(f'{version_before} -> {version_after}')}"
+              + dim("  (the next `skill` run uses the new code)"))
+    else:
+        print(f"  {'version'.ljust(9)} {dim(f'{PROG} {__version__}')}")
+
+
+def _refresh_collection(repo: Repo, collection: str, manifest_path: Path,
+                        dry: bool, force: bool = False, width: int = 24) -> None:
+    """Pull an imported collection's upstream clone and re-copy the recorded
+    skills into projects/<collection>/skills."""
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    url = data.get("clone_url")
+    if not url:
+        raise CLIError("no clone_url in .source.json")
+    source = replace(parse_git_url(url), branch=data.get("branch") or None,
+                     subpath=data.get("subpath") or "")
+    clone_dir = repo.root / "repos" / source.slug
+    pad = collection.ljust(width)
+
+    if dry:  # fetch only touches the cache clone's refs, never projects/
+        if not (clone_dir / ".git").exists():
+            print(f"  {pad} {cyan('would clone')}  {dim(source.clone_url)}")
+            return
+        err = vcs.fetch(clone_dir)
+        if err:
+            print(f"  {pad} {yellow('fetch failed')}  {dim(_trunc(err, 50))}")
+            return
+        st = vcs.state(clone_dir)
+        if st.behind:
+            print(f"  {pad} {cyan(f'would pull {st.behind} commit(s)')}  {dim(source.clone_url)}")
+        else:
+            print(f"  {pad} {green('up to date')}  {dim('@ ' + st.short)}")
+        return
+
+    ensure_clone(source, clone_dir, legacy_dest=repo.root / "repos" / source.name)
+    commit = head_commit(clone_dir)
+    if commit == data.get("commit") and not force:
+        # upstream has not moved: skip the re-copy, so hand edits to imported
+        # skills are only overwritten when there is actually something new
+        print(f"  {pad} {green('up to date')}  {dim('@ ' + commit[:7])}")
+        return
+    scan_root = clone_dir / source.subpath if source.subpath else clone_dir
+    found = {d.name: d for d in discover_skills(scan_root)}
+    dest = repo.skills_dir(collection)
+    recorded = data.get("skills") or sorted(found)
+
+    results, gone = [], []
+    for name in recorded:
+        if not (dest / name).exists():
+            continue  # deleted from the collection on purpose: don't resurrect it
+        if name not in found:
+            gone.append(name)
+            continue
+        results.append(copy_skill(found[name], dest, force=True, dry_run=False, verb="update"))
+    counts = Counter(r.action for r in results)
+    summary = ", ".join(f"{n} {action}" for action, n in sorted(counts.items())) or "nothing imported here"
+    style = green if counts.get("updated") else dim
+    print(f"  {pad} {style(summary)}  {dim(f'@ {commit[:7]}')}")
+    if gone:
+        print(f"  {' ' * width} {yellow('gone upstream: ' + ', '.join(gone[:5]))}")
+    new_upstream = sorted(set(found) - set(recorded))
+    if new_upstream:
+        print(f"  {' ' * width} {dim(f'{len(new_upstream)} new upstream: ' + ', '.join(new_upstream[:5]))}"
+              + dim(f" (skill get {url} -a)"))
+    if commit != data.get("commit"):
+        _write_source_manifest(repo, collection, source, clone_dir,
+                               [r.name for r in results] or recorded)
+
+
+def _update_collections(repo: Repo, only: Sequence[str], dry: bool, force: bool = False) -> None:
+    manifests = [(coll, repo.skills_dir(coll).parent / ".source.json") for coll in repo.collections()]
+    manifests = [(coll, path) for coll, path in manifests
+                 if path.is_file() and (not only or coll in only)]
+    if not manifests:
+        print(dim("  (no collections imported from git)"))
+        return
+    width = min(max(len(coll) for coll, _ in manifests), 34)
+    for collection, path in manifests:
+        try:
+            _refresh_collection(repo, collection, path, dry, force, width)
+        except CLIError as exc:
+            print(f"  {collection.ljust(width)} {red('error')}  {dim(_trunc(str(exc), 60))}")
+
+
+def _installed_index(project_root: Path) -> List[Tuple[Target, Dict[str, Path]]]:
+    """Installed skills per agent dir, de-duplicated by real path so linked
+    dirs (claude -> agents) are not refreshed twice."""
+    seen: Set[Path] = set()
+    index: List[Tuple[Target, Dict[str, Path]]] = []
+    for target in known_targets(project_root):
+        if not target.path.exists():
+            continue
+        real = target.path.resolve()
+        if real in seen:
+            continue
+        seen.add(real)
+        dirs = {d.name: d for d in find_skill_dirs(target.path)}
+        if dirs:
+            index.append((target, dirs))
+    return index
+
+
+def _library_digests(repo: Repo, names: Set[str]) -> Dict[str, Dict[str, str]]:
+    """name -> {collection/name: digest} for the given skill names."""
+    out: Dict[str, Dict[str, str]] = defaultdict(dict)
+    for skill in repo.skills():
+        if skill.name in names:
+            out[skill.name][skill.ref] = skill_digest(skill.path)
+    return out
+
+
+def _propagate(repo: Repo, index: List[Tuple[Target, Dict[str, Path]]],
+               before: Dict[str, Dict[str, str]], force: bool, dry: bool) -> None:
+    """Push library skills that changed during this update into the agent dirs
+    that already have them. Copies the user edited locally are left alone;
+    --force additionally re-syncs every installed copy that drifted, whether or
+    not its library version moved in this run."""
+    names = {name for _, dirs in index for name in dirs}
+    after = _library_digests(repo, names)
+    by_ref = {s.ref: s for s in repo.skills() if s.name in names}
+    groups: List[Tuple[str, List[OpResult]]] = []
+    drifted = 0
+    for target, dirs in index:
+        results: List[OpResult] = []
+        for name, path in sorted(dirs.items()):
+            new = after.get(name) or {}
+            old = before.get(name) or {}
+            if not new:
+                continue  # untracked skill: `skill save` territory, not update's
+            current = skill_digest(path)
+            if current in new.values():
+                continue  # already matches a repo version
+            moved = any(new[ref] != old.get(ref) for ref in new)
+            if not moved and not force:
+                drifted += 1
+                continue  # drift from an earlier edit, not from this update
+            refs = [ref for ref in new if old.get(ref) == current] or (sorted(new) if force else [])
+            if not refs:
+                results.append(OpResult(name, "skipped", path,
+                                        "locally modified; -F to overwrite"))
+                continue
+            results.append(copy_skill(by_ref[refs[0]].path, target.path, True, dry, verb="update"))
+        if results:
+            groups.append((_target_header(target), results))
+    if groups:
+        _print_results(groups)
+    else:
+        print(dim("  (installed copies already match the repo)"))
+    if drifted:
+        print(dim(f"  {drifted} installed skill(s) differ from the repo — see `skill status`"))
+
+
+def cmd_update(args: argparse.Namespace) -> None:
+    repo = _repo(args)
+    project_root = _project_root(args)
+    dry = args.dry_run
+    only = [repo.match_collection(c) for value in (args.collections or [])
+            for c in value.split(",") if c.strip()]
+
+    index = [] if args.no_install else _installed_index(project_root)
+    before = _library_digests(repo, {n for _, dirs in index for n in dirs}) if index else {}
+
+    if not args.no_tool:
+        print(bold("checkout"))
+        _update_checkouts(repo, dry)
+    print(("\n" if not args.no_tool else "") + bold("imported collections"))
+    _update_collections(repo, only, dry, args.force)
+    if index:
+        print("\n" + bold("installed copies"))
+        _propagate(repo, index, before, args.force, dry)
+    changes = vcs.state(repo.root).changes if vcs.is_repo(repo.root) else []
+    if changes and not dry:
+        print(dim(f"\n{len(changes)} uncommitted change(s) in {repo.root} — commit them with `skill sync`"))
+
+
+def _auto_message(repo: Repo, entries: Sequence[Tuple[str, str]]) -> str:
+    """Commit message describing pending changes: which skills were added,
+    updated or removed, plus a count of other files."""
+    prefix = ""
+    if repo.projects_dir != repo.root:
+        try:
+            prefix = repo.projects_dir.relative_to(repo.root).as_posix() + "/"
+        except ValueError:
+            prefix = ""
+    per_skill: Dict[str, Set[str]] = defaultdict(set)
+    other = 0
+    for status, path in entries:
+        if prefix and not path.startswith(prefix):
+            other += 1
+            continue
+        parts = path[len(prefix):].split("/")
+        if len(parts) >= 4 and parts[1] == "skills":
+            per_skill[f"{parts[0]}/{parts[2]}"].add(status)
+        else:
+            other += 1
+    added = sorted(ref for ref, st in per_skill.items() if st == {"A"})
+    removed = sorted(ref for ref, st in per_skill.items() if st == {"D"})
+    updated = sorted(ref for ref in per_skill if ref not in added and ref not in removed)
+    if per_skill:
+        bits = [f"{len(group)} {word}" for group, word in
+                ((added, "added"), (updated, "updated"), (removed, "removed")) if group]
+        title = f"Update skills ({', '.join(bits)})"
+    else:
+        title = f"Update skill-manager ({other} file{'s' if other != 1 else ''})"
+    lines = [f"+ {ref}" for ref in added] + [f"~ {ref}" for ref in updated] + [f"- {ref}" for ref in removed]
+    if per_skill and other:
+        lines.append(f"({other} other file{'s' if other != 1 else ''})")
+    if len(lines) > 20:
+        lines = lines[:20] + [f"...and {len(lines) - 20} more"]
+    return title + ("\n\n" + "\n".join(lines) if lines else "")
+
+
+def _print_change_rows(entries: Sequence[Tuple[str, str]], limit: int = 10) -> None:
+    styles = {"A": green, "D": red, "R": cyan}
+    for status, path in entries[:limit]:
+        print(f"  {styles.get(status, yellow)(status)} {path}")
+    if len(entries) > limit:
+        print(dim(f"  ...and {len(entries) - limit} more"))
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    repo = _repo(args)
+    root = repo.root
+    dry = args.dry_run
+    if not vcs.is_repo(root):
+        raise CLIError(f"{root} is not a git repository (run: git -C {root} init)")
+    st = vcs.state(root)
+    print(bold("repo") + f"    {root}")
+    print(bold("branch") + f"  {st.branch}"
+          + (dim(f" -> {st.upstream}") if st.upstream else dim("  (no upstream yet)")))
+
+    if st.changes:
+        print("\n" + bold(f"{len(st.changes)} local change(s)"))
+        _print_change_rows(st.changes)
+        message = args.message or _auto_message(repo, st.changes)
+        if dry:
+            print(cyan("would commit: ") + message.splitlines()[0])
+        else:
+            vcs.stage_all(root)
+            vcs.commit(root, message)
+            print(green("committed: ") + message.splitlines()[0])
+    else:
+        print("\n" + dim("nothing to commit"))
+
+    if not vcs.default_remote(root):
+        print(dim("no git remote configured — nothing to pull or push"))
+        return
+
+    if args.no_pull:
+        print(dim("pull skipped (--no-pull)"))
+    elif not st.upstream:
+        print(dim(f"{st.branch} has no upstream yet — skipping pull"))
+    elif dry:
+        print(cyan("would pull --rebase") + dim(f" from {st.upstream}"))
+    else:
+        err = vcs.pull_rebase(root)
+        if err:
+            raise CLIError(f"pull failed: {_trunc(err, 200)}")
+        state = vcs.state(root)
+        print(green("pulled") + dim(f" {st.upstream} @ {state.short}"))
+
+    if args.no_push:
+        print(dim("push skipped (--no-push)"))
+    elif dry:
+        print(cyan("would push") + dim(f" to {st.upstream or 'origin/' + st.branch}"))
+    else:
+        state = vcs.state(root)
+        if state.upstream and not state.ahead:
+            print(dim("nothing to push"))
+        else:
+            err = vcs.push(root, state.branch, set_upstream=not state.upstream)
+            if err:
+                raise CLIError(f"push failed: {_trunc(err, 200)}")
+            pushed = f"{state.ahead} commit(s)" if state.ahead else "branch"
+            print(green(f"pushed {pushed}") + dim(f" -> {vcs.state(root).upstream}"))
+
+    if args.public:
+        script = root / "scripts" / "sync_public.sh"
+        if not script.is_file():
+            raise CLIError(f"no public mirror script at {script}")
+        print("\n" + bold("public mirror"))
+        if dry:
+            print(cyan(f"would run bash {script}"))
+        elif subprocess.run(["bash", str(script)]).returncode != 0:
+            raise CLIError("public mirror sync failed (see output above)")
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     project_root = _project_root(args)
     print(f"{PROG} {__version__}")
@@ -756,6 +1102,17 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     try:
         repo = _repo(args)
         print(f"repo:  {repo.root}")
+        if vcs.is_repo(repo.root):
+            st = vcs.state(repo.root)
+            bits = [f"{st.branch} @ {st.short}"]
+            if st.upstream:
+                bits.append(f"{st.ahead} ahead / {st.behind} behind {st.upstream}")
+            else:
+                bits.append("no upstream")
+            if st.changes:
+                bits.append(f"{len(st.changes)} uncommitted")
+            hint = dim("  (skill sync)") if st.changes or st.ahead else ""
+            print(f"git:   {', '.join(bits)}{hint}")
         print("\nCollections:")
         for coll in repo.collections():
             print(f"  {coll.ljust(20)} {len(repo.skills([coll]))} skills")
@@ -853,6 +1210,8 @@ def build_parser() -> argparse.ArgumentParser:
               skill get https://github.com/google-deepmind/science-skills -a
               skill link agents claude,trae       share one skills dir across agents
               skill status                        compare installed skills with the repo
+              skill update                        pull tool + upstream skills, refresh installs
+              skill sync                          commit, pull --rebase and push the skill repo
             """
         ).strip(),
     )
@@ -943,6 +1302,33 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p)
     p.add_argument("-t", "--to", action="append", metavar="TARGET", help="only these agent dirs (repeatable)")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("update", aliases=["up", "upgrade"],
+                       help="pull the tool + imported skills from upstream, refresh installed copies")
+    _add_common(p)
+    p.add_argument("collections", nargs="*", metavar="collection",
+                   help="only refresh these imported collections (default: all)")
+    p.add_argument("--no-tool", dest="no_tool", action="store_true",
+                   help="skip updating the skill-manager checkout itself")
+    p.add_argument("--no-install", dest="no_install", action="store_true",
+                   help="skip refreshing installed copies in agent dirs")
+    p.add_argument("-F", "--force", action="store_true",
+                   help="also overwrite installed copies that were edited locally")
+    p.add_argument("-n", "--dry-run", "--dry", dest="dry_run", action="store_true",
+                   help="only report what is behind upstream")
+    p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("sync", aliases=["push"],
+                       help="commit local skill changes, pull --rebase, and push the skill repo")
+    _add_common(p)
+    p.add_argument("-m", "--message", help="commit message (default: generated from the changes)")
+    p.add_argument("--no-pull", action="store_true", help="don't pull before pushing")
+    p.add_argument("--no-push", action="store_true", help="commit (and pull) only")
+    p.add_argument("--public", action="store_true",
+                   help="also run scripts/sync_public.sh (open-source mirror)")
+    p.add_argument("-n", "--dry-run", "--dry", dest="dry_run", action="store_true",
+                   help="show what would be committed/pulled/pushed")
+    p.set_defaults(func=cmd_sync)
 
     p = sub.add_parser("doctor", aliases=["d"], help="show repo, collections, agent dirs, and launcher state")
     _add_common(p)
